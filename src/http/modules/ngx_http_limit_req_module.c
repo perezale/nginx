@@ -912,6 +912,15 @@ ngx_http_limit_req_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             } else if (ngx_strncmp(p, "r/m", 3) == 0) {
                 scale = 60;
                 len -= 3;
+            } else if (ngx_strncmp(p, "r/h", 3) == 0) {
+                scale = 3600;
+                len -= 3;
+            } else if (ngx_strncmp(p, "r/d", 3) == 0) {
+                scale = 86400;
+                len -= 3;
+            } else if (ngx_strncmp(p, "r/w", 3) == 0) {
+                scale = 604800;
+                len -= 3;
             }
 
             rate = ngx_atoi(value[i].data + 5, len - 5);
