@@ -1,4 +1,4 @@
-Julian, [1 Sep 2023 at 16:45:51]:
+
 all I did to build it on a clean Debian was:
 
 add contrib and non-free sources to /etc/apt/sources.list:
