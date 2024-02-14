@@ -211,6 +211,8 @@ ngx_quic_run(ngx_connection_t *c, ngx_quic_conf_t *conf)
     qc = ngx_quic_get_connection(c);
 
     ngx_add_timer(c->read, qc->tp.max_idle_timeout);
+    ngx_add_timer(&qc->close, qc->conf->handshake_timeout);
+
     ngx_quic_connstate_dbg(c);
 
     c->read->handler = ngx_quic_input_handler;
@@ -258,14 +260,7 @@ ngx_quic_new_connection(ngx_connection_t *c, ngx_quic_conf_t *conf,
 
     ngx_queue_init(&qc->free_frames);
 
-    qc->avg_rtt = NGX_QUIC_INITIAL_RTT;
-    qc->rttvar = NGX_QUIC_INITIAL_RTT / 2;
-    qc->min_rtt = NGX_TIMER_INFINITE;
-    qc->first_rtt = NGX_TIMER_INFINITE;
-
-    /*
-     * qc->latest_rtt = 0
-     */
+    ngx_quic_init_rtt(qc);
 
     qc->pto.log = c->log;
     qc->pto.data = c;
@@ -333,6 +328,7 @@ ngx_quic_new_connection(ngx_connection_t *c, ngx_quic_conf_t *conf,
     qc->validated = pkt->validated;
 
     if (ngx_quic_open_sockets(c, qc, pkt) != NGX_OK) {
+        ngx_quic_keys_cleanup(qc->keys);
         return NULL;
     }
 
@@ -418,7 +414,7 @@ ngx_quic_input_handler(ngx_event_t *rev)
     if (c->close) {
         c->close = 0;
 
-        if (!ngx_exiting) {
+        if (!ngx_exiting || !qc->streams.initialized) {
             qc->error = NGX_QUIC_ERR_NO_ERROR;
             qc->error_reason = "graceful shutdown";
             ngx_quic_close_connection(c, NGX_ERROR);
@@ -485,6 +481,10 @@ ngx_quic_close_connection(ngx_connection_t *c, ngx_int_t rc)
             ngx_quic_free_frames(c, &qc->send_ctx[i].sent);
         }
 
+        if (qc->close.timer_set) {
+            ngx_del_timer(&qc->close);
+        }
+
         if (rc == NGX_DONE) {
 
             /*
@@ -524,14 +524,14 @@ ngx_quic_close_connection(ngx_connection_t *c, ngx_int_t rc)
             for (i = 0; i < NGX_QUIC_SEND_CTX_LAST; i++) {
                 ctx = &qc->send_ctx[i];
 
-                if (!ngx_quic_keys_available(qc->keys, ctx->level)) {
+                if (!ngx_quic_keys_available(qc->keys, ctx->level, 1)) {
                     continue;
                 }
 
                 qc->error_level = ctx->level;
                 (void) ngx_quic_send_cc(c);
 
-                if (rc == NGX_OK && !qc->close.timer_set) {
+                if (rc == NGX_OK) {
                     ngx_add_timer(&qc->close, 3 * ngx_quic_pto(c, ctx));
                 }
             }
@@ -578,6 +578,8 @@ ngx_quic_close_connection(ngx_connection_t *c, ngx_int_t rc)
     }
 
     ngx_quic_close_sockets(c);
+
+    ngx_quic_keys_cleanup(qc->keys);
 
     ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0, "quic close completed");
 
@@ -953,7 +955,7 @@ ngx_quic_handle_payload(ngx_connection_t *c, ngx_quic_header_t *pkt)
 
     c->log->action = "decrypting packet";
 
-    if (!ngx_quic_keys_available(qc->keys, pkt->level)) {
+    if (!ngx_quic_keys_available(qc->keys, pkt->level, 0)) {
         ngx_log_error(NGX_LOG_INFO, c->log, 0,
                       "quic no %s keys, ignoring packet",
                       ngx_quic_level_name(pkt->level));
@@ -1076,7 +1078,9 @@ ngx_quic_discard_ctx(ngx_connection_t *c, enum ssl_encryption_level_t level)
 
     qc = ngx_quic_get_connection(c);
 
-    if (!ngx_quic_keys_available(qc->keys, level)) {
+    if (!ngx_quic_keys_available(qc->keys, level, 0)
+        && !ngx_quic_keys_available(qc->keys, level, 1))
+    {
         return;
     }
 
